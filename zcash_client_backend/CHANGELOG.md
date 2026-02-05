@@ -23,6 +23,13 @@ workspace.
 - `zcash_client_backend::TransferType::AccountInternal`: indicates an output
   whose recipient and funder are the same wallet account (e.g. change). This
   has the semantics previously carried by `TransferType::WalletInternal`.
+- `zcash_client_backend::scanning`:
+  - `full` module, providing full-block scanning.
+  - `Nullifiers::unspent` and `Nullifiers::update_with` are now public, for use
+    when driving block scanning via the `full` module.
+- `zcash_client_backend::sync`:
+  - `decryptor` module, behind the `sync-decryptor` feature flag, providing a
+    Tokio-based batch decryption engine for full blocks and transactions.
 
 ### Changed
 - `zcash_client_backend::data_api`:
@@ -57,7 +64,7 @@ workspace.
       `recipient_key_scope`, and `funding_account` parameters.
 
 ### Removed
-- `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput` 
+- `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput`
   instead).
 
 ## [0.22.0] - 2026-04-27
