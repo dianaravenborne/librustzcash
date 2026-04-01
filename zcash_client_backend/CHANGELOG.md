@@ -23,6 +23,7 @@ workspace.
 - `zcash_client_backend::TransferType::AccountInternal`: indicates an output
   whose recipient and funder are the same wallet account (e.g. change). This
   has the semantics previously carried by `TransferType::WalletInternal`.
+- `zcash_client_backend::wallet::WalletTx::transparent_outputs`
 - `zcash_client_backend::scanning`:
   - `full` module, providing full-block scanning.
   - `Nullifiers::unspent` and `Nullifiers::update_with` are now public, for use
@@ -62,6 +63,8 @@ workspace.
     - It now has an `AccountId` generic parameter,
     - `from_parts` now takes additional `recipient_account`,
       `recipient_key_scope`, and `funding_account` parameters.
+- `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
+  argument.
 
 ### Removed
 - `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput`
