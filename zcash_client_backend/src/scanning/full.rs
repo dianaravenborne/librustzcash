@@ -205,6 +205,9 @@ impl<IvkTag> PendingBatch<IvkTag> {
 }
 
 /// The result of batch-decrypting a single transaction.
+///
+/// This is an opaque value, produced by [`decrypt_block`] (or the `sync::decryptor`
+/// engine) and consumed by [`scan_block`]; it is not intended to be inspected directly.
 pub struct BatchResult<IvkTag> {
     tx: Transaction,
     sapling: HashMap<usize, DecryptedOutput<IvkTag, SaplingDomain, [u8; 512]>>,
@@ -258,6 +261,7 @@ where
 
 /// Errors that can occur while scanning a full block via [`scan_block`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ScanBlockError<E> {
     /// A structural or continuity error in the block being scanned.
     Scan(ScanError),
@@ -269,6 +273,27 @@ pub enum ScanBlockError<E> {
 impl<E> From<ScanError> for ScanBlockError<E> {
     fn from(e: ScanError) -> Self {
         ScanBlockError::Scan(e)
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for ScanBlockError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScanBlockError::Scan(e) => write!(f, "Error scanning block: {e}"),
+            ScanBlockError::AddressLookup(e) => write!(
+                f,
+                "Error looking up the wallet account for a transparent address: {e}"
+            ),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ScanBlockError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ScanBlockError::Scan(e) => Some(e),
+            ScanBlockError::AddressLookup(e) => Some(e),
+        }
     }
 }
 
@@ -295,7 +320,7 @@ pub fn scan_block<P, AccountId, IvkTag, E>(
     params: &P,
     height: BlockHeight,
     header: &BlockHeader,
-    vtx: &[BatchResult<IvkTag>],
+    vtx: Vec<BatchResult<IvkTag>>,
     scanning_keys: &ScanningKeys<AccountId, IvkTag>,
     nullifiers: &Nullifiers<AccountId>,
     prior_block_metadata: Option<&BlockMetadata>,
@@ -347,7 +372,7 @@ where
     let cur_hash = header.hash();
     let zip212_enforcement = zip212_enforcement(params, height);
 
-    let mut pos_tracker = PositionTracker::for_block(params, height, vtx, prior_block_metadata)?;
+    let mut pos_tracker = PositionTracker::for_block(params, height, &vtx, prior_block_metadata)?;
 
     let mut wtxs: Vec<WalletTx<AccountId>> = vec![];
 
@@ -359,13 +384,18 @@ where
     #[cfg(feature = "orchard")]
     let mut orchard_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
-    for (tx_index, tx) in vtx.iter().enumerate() {
-        let txid = tx.tx.txid();
+    for (tx_index, batch) in vtx.into_iter().enumerate() {
+        let BatchResult {
+            tx,
+            sapling: sapling_decrypted,
+            #[cfg(feature = "orchard")]
+            orchard: orchard_decrypted,
+        } = batch;
+        let txid = tx.txid();
         let tx_index =
             TxIndex::try_from(tx_index).expect("Cannot fit more than 2^16 transactions in a block");
 
         let (sapling_spends, sapling_unlinked_nullifiers) = tx
-            .tx
             .sapling_bundle()
             .map(|bundle| {
                 find_spent(
@@ -382,7 +412,6 @@ where
         #[cfg(feature = "orchard")]
         let orchard_spends = {
             let (orchard_spends, orchard_unlinked_nullifiers) = tx
-                .tx
                 .orchard_bundle()
                 .map(|bundle| {
                     find_spent(
@@ -411,7 +440,7 @@ where
         if spent_from_accounts.len() > 1 {
             warn!(
                 "More than one wallet account detected as funding transaction {:?}, selecting {:?}",
-                tx.tx.txid(),
+                txid,
                 funding_account
                     .expect("funding_account is Some when spent_from_accounts is nonempty")
             )
@@ -421,7 +450,7 @@ where
         // received transparent outputs are scanned here.
         let transparent_outputs = detect_wallet_transparent_outputs(
             params,
-            &tx.tx,
+            &tx,
             Some(height),
             funding_account,
             #[cfg(feature = "transparent-inputs")]
@@ -431,12 +460,11 @@ where
         let has_transparent = !transparent_outputs.is_empty();
 
         let (sapling_outputs, mut sapling_nc) = tx
-            .tx
             .sapling_bundle()
             .map(|bundle| {
                 find_received(
                     height,
-                    pos_tracker.tx_contains_last_sapling_outputs_in_block(&tx.tx),
+                    pos_tracker.tx_contains_last_sapling_outputs_in_block(&tx),
                     txid,
                     |output_idx| pos_tracker.sapling_note_position(output_idx),
                     &scanning_keys.sapling,
@@ -446,7 +474,7 @@ where
                         .iter()
                         .map(|output| (SaplingDomain::new(zip212_enforcement), output.clone()))
                         .collect::<Vec<_>>(),
-                    Some(|_| tx.sapling.clone()),
+                    Some(move |_| sapling_decrypted),
                     batch::try_note_decryption,
                     |output| sapling::Node::from_cmu(output.cmu()),
                 )
@@ -457,12 +485,11 @@ where
 
         #[cfg(feature = "orchard")]
         let (orchard_outputs, mut orchard_nc) = tx
-            .tx
             .orchard_bundle()
             .map(|bundle| {
                 find_received(
                     height,
-                    pos_tracker.tx_contains_last_orchard_actions_in_block(&tx.tx),
+                    pos_tracker.tx_contains_last_orchard_actions_in_block(&tx),
                     txid,
                     |output_idx| pos_tracker.orchard_note_position(output_idx),
                     &scanning_keys.orchard,
@@ -472,7 +499,7 @@ where
                         .iter()
                         .map(|action| (OrchardDomain::for_action(action), action.clone()))
                         .collect::<Vec<_>>(),
-                    Some(|_| tx.orchard.clone()),
+                    Some(move |_| orchard_decrypted),
                     batch::try_note_decryption,
                     |action| MerkleHashOrchard::from_cmx(action.cmx()),
                 )
@@ -500,7 +527,7 @@ where
             ));
         }
 
-        pos_tracker.increment_over_tx(&tx.tx);
+        pos_tracker.increment_over_tx(&tx);
     }
 
     pos_tracker.check_end_of_block_consistency()?;
@@ -573,14 +600,20 @@ impl PositionTracker {
 
             // We pre-compute the end tree size here so we can determine when we reach the
             // last transaction in the block that adds notes to the tree. This enables us
-            // to correctly set the tree checkpoint in `find_received`.
-            let end_tree_size = start_tree_size
-                + vtx
-                    .iter()
-                    .map(|tx| &tx.tx)
-                    .map(tx_output_count)
-                    .map(|tx_outputs| u32::try_from(tx_outputs).unwrap())
-                    .sum::<u32>();
+            // to correctly set the tree checkpoint in `find_received`. Note commitment
+            // tree sizes are `u32`-bounded by the protocol, so overflow here indicates
+            // corrupt or adversarial input rather than a valid chain state.
+            let overflow = || ScanError::TreeSizeOverflow {
+                protocol,
+                at_height,
+            };
+            let end_tree_size = vtx.iter().map(|tx| &tx.tx).map(tx_output_count).try_fold(
+                start_tree_size,
+                |acc, tx_outputs| {
+                    let tx_outputs = u32::try_from(tx_outputs).map_err(|_| overflow())?;
+                    acc.checked_add(tx_outputs).ok_or_else(overflow)
+                },
+            )?;
 
             Ok((start_tree_size, end_tree_size))
         }
